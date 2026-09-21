@@ -426,80 +426,105 @@ function openTicket(){const ov=document.getElementById("ticket");ov.hidden=false
 function closeTicket(){document.getElementById("ticket").hidden=true;document.body.style.overflow=""}
 
 /* ---------- Kontakt / Visitenkarte ---------- */
-let kontakt={vcf:null,edit:false,svg:null,loaded:false};
-function unfold(v){return v.replace(/\r\n/g,"\n").replace(/\n[ \t]/g,"")}
-function vUnesc(s){return s.replace(/\\n/gi,"\n").replace(/\\([,;\\])/g,"$1")}
-function parseVcf(v){
-  const o={fn:"",title:"",org:"",tel:[],email:[],url:[],adr:""};
-  for(const line of unfold(v).split("\n")){
-    const i=line.indexOf(":"); if(i<0) continue;
-    const key=line.slice(0,i).split(";")[0].split(".").pop().toUpperCase(), val=vUnesc(line.slice(i+1).trim());
-    if(key==="FN") o.fn=val; else if(key==="TITLE") o.title=val; else if(key==="ORG") o.org=val.split(";").filter(Boolean).join(", ");
-    else if(key==="TEL") o.tel.push(val.replace(/^tel:/i,"")); else if(key==="EMAIL") o.email.push(val); else if(key==="URL") o.url.push(val);
-    else if(key==="ADR") o.adr=val.split(";").filter(Boolean).join(", ");
-    else if(key==="N"&&!o.fn){const p=val.split(";");o.fn=[p[3],p[1],p[0]].filter(Boolean).join(" ")}
+const KONTAKT_STANDARD={fn:"Florian Timmermeister",first:"Florian",last:"Timmermeister",title:"Fortbildungsreferent",
+  org:"Hochschule Meißen (FH) und Fortbildungszentrum",unit:"Sachgebiet Digitalisierung",email:"florian.timmermeister@hsf.sachsen.de",
+  tel:"",mobil:"",url:"",street:"Herbert-Böhme-Straße 11",zip:"01662",city:"Meißen",country:"Deutschland"};
+const KFIELDS=[["fn","Name"],["title","Funktion"],["org","Organisation"],["unit","Abteilung"],["email","E-Mail","email"],["tel","Telefon","tel"],["mobil","Mobil","tel"],["url","Webseite","url"],["street","Straße und Hausnummer"],["zip","PLZ"],["city","Ort"],["country","Land"]];
+let kontakt={f:null,edit:false,svg:null,loaded:false,warn:""};
+/* vCard 2.1/3.0/4.0 einlesen, inkl. Quoted-Printable (UTF-8); Foto & Co. werden verworfen */
+function vcfLines(v){
+  const src=v.replace(/\r\n/g,"\n").replace(/\r/g,"\n").split("\n"), out=[];
+  for(let i=0;i<src.length;i++){
+    let l=src[i];
+    if(/^[ \t]/.test(l)&&out.length){out[out.length-1]+=l.slice(1);continue}
+    if(/ENCODING=QUOTED-PRINTABLE/i.test(l.split(":")[0])) while(/=$/.test(l)&&i+1<src.length) l=l.slice(0,-1)+src[++i];
+    out.push(l);
   }
-  return o;
+  return out.filter(Boolean);
 }
-function stripForQr(v){return unfold(v).split("\n").filter(l=>!/^(PHOTO|LOGO|SOUND|KEY)[;:]/i.test(l.replace(/^[^.:;]+\./,""))).join("\r\n")}
-function vEsc(s){return String(s).replace(/\\/g,"\\\\").replace(/([,;])/g,"\\$1").replace(/\n/g,"\\n")}
+function qpDecode(s){const bytes=[];for(let i=0;i<s.length;i++){if(s[i]==="="&&/^[0-9A-F]{2}$/i.test(s.substr(i+1,2))){bytes.push(parseInt(s.substr(i+1,2),16));i+=2}else bytes.push(...new TextEncoder().encode(s[i]))}return new TextDecoder("utf-8").decode(new Uint8Array(bytes))}
+const vUn=s=>s.replace(/\\n/gi,"\n").replace(/\\([,;\\])/g,"$1");
+const splitSemi=s=>s.split(/(?<!\\);/).map(vUn);
+function parseVcf(text){
+  const f={...Object.fromEntries(KFIELDS.map(([k])=>[k,""])),first:"",last:""};
+  for(const line of vcfLines(text)){
+    const i=line.indexOf(":"); if(i<0) continue;
+    const head=line.slice(0,i), params=head.toUpperCase().split(";"), key=params[0].split(".").pop();
+    if(/^(PHOTO|LOGO|SOUND|KEY)$/.test(key)) continue;
+    let val=line.slice(i+1); if(params.some(x=>x==="ENCODING=QUOTED-PRINTABLE"||x==="QUOTED-PRINTABLE")) val=qpDecode(val);
+    const ptxt=params.join(";");
+    if(key==="FN") f.fn=vUn(val);
+    else if(key==="N"){const n=splitSemi(val);f.last=n[0]||"";f.first=n[1]||""}
+    else if(key==="TITLE") f.title=vUn(val);
+    else if(key==="ORG"){const o=splitSemi(val).filter(Boolean);f.org=o[0]||"";f.unit=o.slice(1).join(", ")}
+    else if(key==="EMAIL"&&!f.email) f.email=vUn(val).replace(/^mailto:/i,"");
+    else if(key==="URL"&&!f.url) f.url=vUn(val);
+    else if(key==="TEL"){const v=vUn(val).replace(/^tel:/i,"");if(/CELL/.test(ptxt)){if(!f.mobil)f.mobil=v}else if(!f.tel)f.tel=v;else if(!f.mobil)f.mobil=v}
+    else if(key==="ADR"&&!f.street&&!f.city){
+      const a=splitSemi(val); f.street=[a[1],a[2]].filter(Boolean).join(", "); f.city=a[3]||""; f.zip=a[5]||""; f.country=a[6]||"";
+      if(!f.city&&!f.zip){const m=/^(.*?),\s*(\d{4,5})\s+([^,]+)(?:,\s*(.+))?$/.exec(f.street);if(m){f.street=m[1];f.zip=m[2];f.city=m[3];f.country=m[4]||""}}
+    }
+  }
+  if(!f.fn) f.fn=[f.first,f.last].filter(Boolean).join(" ");
+  return f;
+}
+function vEsc(s){return String(s||"").replace(/\\/g,"\\\\").replace(/([,;])/g,"\\$1").replace(/\n/g,"\\n")}
 function buildVcf(f){
-  const parts=f.fn.trim().split(/\s+/); const last=parts.length>1?parts.pop():parts[0]||""; const first=parts.length&&f.fn.trim().split(/\s+/).length>1?parts.join(" "):"";
+  let first=f.first, last=f.last;
+  if(!last){const p=f.fn.trim().split(/\s+/);last=p.length>1?p.pop():p[0]||"";first=p.length?p.join(" "):""}
+  const adr=f.street||f.zip||f.city||f.country;
   return ["BEGIN:VCARD","VERSION:3.0",`N:${vEsc(last)};${vEsc(first)};;;`,`FN:${vEsc(f.fn.trim())}`,
-    f.org&&`ORG:${vEsc(f.org)}`,f.title&&`TITLE:${vEsc(f.title)}`,f.tel&&`TEL;TYPE=WORK,VOICE:${f.tel}`,f.mobil&&`TEL;TYPE=CELL:${f.mobil}`,
-    f.email&&`EMAIL;TYPE=INTERNET,WORK:${f.email}`,f.url&&`URL:${f.url}`,"END:VCARD"].filter(Boolean).join("\r\n");
+    (f.org||f.unit)&&`ORG:${vEsc(f.org)}${f.unit?";"+vEsc(f.unit):""}`,f.title&&`TITLE:${vEsc(f.title)}`,
+    f.tel&&`TEL;TYPE=WORK,VOICE:${f.tel}`,f.mobil&&`TEL;TYPE=CELL:${f.mobil}`,f.email&&`EMAIL;TYPE=INTERNET,WORK:${f.email}`,
+    f.url&&`URL:${f.url}`,adr&&`ADR;TYPE=WORK:;;${vEsc(f.street)};${vEsc(f.city)};;${vEsc(f.zip)};${vEsc(f.country)}`,"END:VCARD"].filter(Boolean).join("\r\n");
 }
-async function saveVcf(text,name){
-  const qrText=stripForQr(text); let svg=null, warn="";
-  if(new TextEncoder().encode(qrText).length>1400) warn="Die Visitenkarte ist für einen gut scanbaren QR-Code recht umfangreich. Weniger Felder machen den Code robuster.";
-  try{svg=await qrSvg(qrText,"L")}catch(e){warn=e.message}
-  await idb.set("vcard",{text,name:name||"visitenkarte.vcf",svg,warn});
+async function saveKontakt(f){await idb.set("vcard-felder",f);kontakt.f=f;kontakt.svg=null}
+async function ensureQr(){
+  if(kontakt.svg||!kontakt.f) return;
+  try{kontakt.svg=await qrSvg(buildVcf(kontakt.f),"M");kontakt.warn=""}catch(e){kontakt.warn=e.message+". Der QR-Code wird angezeigt, sobald eine Internetverbindung besteht."}
+  if(state.view==="kontakt") render();
 }
 function viewKontakt(){
   if(!kontakt.loaded) return `<p class="hint" style="margin-top:16px">Lade Visitenkarte …</p>`;
-  const c=kontakt.vcf;
-  if(!c||kontakt.edit){
-    const p=c?parseVcf(c.text):{fn:"",title:"",org:"",tel:[],email:[],url:[]};
-    const tel=p.tel||[];
-    return `<h2 class="sec">${c?"Visitenkarte bearbeiten":"Meine Visitenkarte"}</h2>
-      ${c?"":`<p>Lade deine elektronische Visitenkarte (.vcf) hoch oder leg sie hier an. Sie wird nur auf diesem Gerät gespeichert.</p>
-      <div class="acts"><button class="btn primary" data-k-up>.vcf-Datei hochladen</button></div>`}
+  const f=kontakt.f;
+  if(kontakt.edit){
+    return `<h2 class="sec">Visitenkarte bearbeiten</h2>
       <form class="kform" id="kform">
-        <label>Name<input name="fn" value="${escH(p.fn)}" required autocomplete="name"></label>
-        <label>Funktion<input name="title" value="${escH(p.title)}" autocomplete="organization-title"></label>
-        <label>Organisation<input name="org" value="${escH(p.org)}" autocomplete="organization"></label>
-        <label>Telefon<input name="tel" type="tel" value="${escH(tel[0]||"")}"></label>
-        <label>Mobil<input name="mobil" type="tel" value="${escH(tel[1]||"")}"></label>
-        <label>E-Mail<input name="email" type="email" value="${escH((p.email||[])[0]||"")}" autocomplete="email"></label>
-        <label>Webseite<input name="url" type="url" value="${escH((p.url||[])[0]||"")}"></label>
-        <div class="acts"><button class="btn primary" type="submit">Visitenkarte speichern</button>${c?`<button class="btn plain" type="button" data-k-cancel>Abbrechen</button>`:""}</div>
-        ${c?`<p class="note">Beim Speichern werden nur diese Felder übernommen; weitere Angaben aus der hochgeladenen Datei, etwa ein Foto, entfallen.</p>`:""}
+        ${KFIELDS.map(([k,l,type])=>`<label>${l}<input name="${k}" ${type?`type="${type}"`:""} value="${escH(f[k])}" ${k==="fn"?"required":""}></label>`).join("")}
+        <div class="acts"><button class="btn primary" type="submit">Visitenkarte speichern</button><button class="btn plain" type="button" data-k-cancel>Abbrechen</button></div>
       </form>`;
   }
-  const p=parseVcf(c.text);
-  const share=navigator.share?`<button class="btn" data-k-share>Teilen</button>`:"";
-  const u=blobUrl("vcf",new Blob([c.text],{type:"text/vcard"}));
+  const u=blobUrl("vcf",new Blob([buildVcf(f)],{type:"text/vcard"}));
+  const orgLine=[f.title,[f.org,f.unit].filter(Boolean).join(", ")].filter(Boolean);
+  const adr=[f.street,[f.zip,f.city].filter(Boolean).join(" "),f.country].filter(Boolean).join(", ");
   return `<h2 class="sec">Meine Visitenkarte</h2>
-    <div class="vcard"><h3>${escH(p.fn)}</h3>${p.title||p.org?`<p class="sub">${escH([p.title,p.org].filter(Boolean).join(", "))}</p>`:""}
-      ${p.tel.map(t=>`<p><a href="tel:${escH(t.replace(/\s/g,""))}">${escH(t)}</a></p>`).join("")}
-      ${p.email.map(m=>`<p><a href="mailto:${escH(m)}">${escH(m)}</a></p>`).join("")}
-      ${p.url.map(w=>`<p><a href="${escH(w)}" target="_blank" rel="noopener">${escH(w)}</a></p>`).join("")}
-      ${p.adr?`<p>${escH(p.adr)}</p>`:""}</div>
+    <div class="vcard"><h3>${escH(f.fn)}</h3>${orgLine.map(x=>`<p class="sub" style="margin:2px 0">${escH(x)}</p>`).join("")}
+      <div style="margin-top:10px">
+      ${f.tel?`<p><a href="tel:${escH(f.tel.replace(/\s/g,""))}">${escH(f.tel)}</a></p>`:""}
+      ${f.mobil?`<p><a href="tel:${escH(f.mobil.replace(/\s/g,""))}">${escH(f.mobil)}</a> (mobil)</p>`:""}
+      ${f.email?`<p><a href="mailto:${escH(f.email)}">${escH(f.email)}</a></p>`:""}
+      ${f.url?`<p><a href="${escH(f.url)}" target="_blank" rel="noopener">${escH(f.url)}</a></p>`:""}
+      ${adr?`<p>${escH(adr)}</p>`:""}</div></div>
     <h2 class="sec">Zum Scannen zeigen</h2>
-    <div class="qrbox">${c.svg||`<p>QR-Code konnte nicht erzeugt werden.</p>`}<p>Mit der Handykamera scannen, um den Kontakt zu speichern.</p></div>
-    ${c.warn?`<p class="note">${escH(c.warn)}</p>`:""}
-    <div class="acts">${share}<a class="btn" href="${u}" download="${escH(c.name)}">Als .vcf speichern</a><button class="btn plain" data-k-edit>Bearbeiten</button><button class="btn plain" data-k-up>Ersetzen</button><button class="btn plain" data-k-rm>Entfernen</button></div>`;
+    <div class="qrbox">${kontakt.svg||`<p>QR-Code wird erzeugt …</p>`}<p>Mit der Handykamera scannen, um den Kontakt zu speichern.</p></div>
+    ${kontakt.warn?`<p class="note">${escH(kontakt.warn)}</p>`:""}
+    <div class="acts">${navigator.share?`<button class="btn" data-k-share>Teilen</button>`:""}<a class="btn" href="${u}" download="${escH(f.fn.replace(/\s+/g,"_")||"visitenkarte")}.vcf">Als .vcf speichern</a><button class="btn plain" data-k-edit>Bearbeiten</button><button class="btn plain" data-k-up>Andere .vcf laden</button><button class="btn plain" data-k-rm>Standard wiederherstellen</button></div>
+    <p class="note">Foto und weitere Anhänge einer hochgeladenen .vcf werden nicht übernommen. Änderungen werden nur auf diesem Gerät gespeichert.</p>`;
 }
-async function loadKontakt(){try{kontakt.vcf=await idb.get("vcard")||null}catch(e){kontakt.vcf=null}kontakt.loaded=true;if(state.view==="kontakt")render()}
+async function loadKontakt(){
+  let f=null; try{f=await idb.get("vcard-felder")}catch(e){}
+  kontakt.f=f||{...KONTAKT_STANDARD}; kontakt.loaded=true; kontakt.svg=null;
+  if(state.view==="kontakt") render();
+}
 function kontaktAfterRender(){
   if(!kontakt.loaded){loadKontakt();return}
-  const f=document.getElementById("kform");
-  if(f) f.addEventListener("submit",async ev=>{ev.preventDefault();const d=Object.fromEntries(new FormData(f));if(!d.fn.trim())return;
-    const btn=f.querySelector('[type=submit]');btn.disabled=true;btn.textContent="Speichere …";
-    try{await saveVcf(buildVcf(d),(d.fn.trim().replace(/\s+/g,"_")||"visitenkarte")+".vcf");kontakt.edit=false;await loadKontakt()}
-    catch(e){btn.disabled=false;btn.textContent="Visitenkarte speichern";alert("Speichern fehlgeschlagen: "+e.message)}});
+  if(!kontakt.edit) ensureQr();
+  const form=document.getElementById("kform");
+  if(form) form.addEventListener("submit",async ev=>{ev.preventDefault();const d=Object.fromEntries(new FormData(form));if(!d.fn.trim())return;
+    const old=kontakt.f; const nf={...old,...d};
+    if(d.fn.trim()!==old.fn){nf.first="";nf.last=""}
+    try{await saveKontakt(nf);kontakt.edit=false;render()}catch(e){alert("Speichern fehlgeschlagen: "+e.message)}});
 }
-
 document.addEventListener("click",async e=>{
   const b=e.target.closest("button"); if(!b) return; const ds=b.dataset;
   if("ticketOpen" in ds){openTicket();return}
@@ -509,8 +534,8 @@ document.addEventListener("click",async e=>{
   if("kUp" in ds){document.getElementById("f-vcf").click();return}
   if("kEdit" in ds){kontakt.edit=true;render();return}
   if("kCancel" in ds){kontakt.edit=false;render();return}
-  if("kRm" in ds){if(confirm("Visitenkarte von diesem Gerät entfernen?")){await idb.del("vcard");kontakt.vcf=null;render()}return}
-  if("kShare" in ds){const c=kontakt.vcf;const file=new File([c.text],c.name,{type:"text/vcard"});
+  if("kRm" in ds){if(confirm("Eigene Änderungen verwerfen und die Standard-Visitenkarte wiederherstellen?")){await idb.del("vcard-felder");await loadKontakt()}return}
+  if("kShare" in ds){const txt=buildVcf(kontakt.f);const c={text:txt,name:(kontakt.f.fn.replace(/\s+/g,"_")||"visitenkarte")+".vcf"};const file=new File([c.text],c.name,{type:"text/vcard"});
     try{ if(navigator.canShare&&navigator.canShare({files:[file]})) await navigator.share({files:[file],title:"Visitenkarte"}); else await navigator.share({title:"Visitenkarte",text:c.text}); }catch(err){}
     return}
 });
@@ -523,8 +548,8 @@ async function handleFile(input,fn,label){
 document.getElementById("f-pdf").addEventListener("change",async e=>{await handleFile(e.target,importPdf,"PDF");renderTicket()});
 document.getElementById("f-pass").addEventListener("change",async e=>{await handleFile(e.target,importPass,"Wallet-Ticket");renderTicket()});
 document.getElementById("f-vcf").addEventListener("change",async e=>{const input=e.target;
-  await handleFile(input,async file=>{const text=await file.text();if(!/BEGIN:VCARD/i.test(text))throw new Error("Die Datei ist keine gültige Visitenkarte (.vcf)");await saveVcf(text,file.name)},null);
-  kontakt.edit=false;await loadKontakt()});
+  await handleFile(input,async file=>{const text=await file.text();if(!/BEGIN:VCARD/i.test(text))throw new Error("Die Datei ist keine gültige Visitenkarte (.vcf)");await saveKontakt(parseVcf(text))},null);
+  kontakt.edit=false;render()});
 
 render();
 // Externe JSON-Datei bevorzugen, falls vorhanden (nur bei Auslieferung über einen Webserver)
